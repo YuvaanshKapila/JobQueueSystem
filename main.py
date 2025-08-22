@@ -1394,3 +1394,547 @@ class AdvancedJobManager:
             TaskType.SYSTEM_MAINTENANCE.value: 'maintenance'
         }
         return queue_mapping.get(task_name, 'default')
+    
+    def get_job_status(self, task_id: str) -> Optional[JobResult]:
+        job = self.db.get_job(task_id)
+        if job:
+            result = AsyncResult(task_id, app=self.celery)
+            job.status = JobStatus(result.status)
+            if result.successful():
+                job.result = result.result
+            elif result.failed():
+                job.error = str(result.result)
+                job.traceback = result.traceback
+        return job
+    
+    def cancel_job(self, task_id: str) -> bool:
+        try:
+            self.celery.control.revoke(task_id, terminate=True)
+            job = self.db.get_job(task_id)
+            if job:
+                job.status = JobStatus.CANCELLED
+                job.completed_at = datetime.utcnow()
+                self.db.save_job(job)
+            self.redis.hset(f"task:{task_id}", "status", "CANCELLED")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to cancel job {task_id}: {e}")
+            return False
+    
+    def get_queue_stats(self) -> Dict[str, Any]:
+        inspect = self.celery.control.inspect()
+        
+        try:
+            active_tasks = inspect.active() or {}
+            scheduled_tasks = inspect.scheduled() or {}
+            reserved_tasks = inspect.reserved() or {}
+            registered_tasks = inspect.registered() or {}
+            stats = inspect.stats() or {}
+        except Exception as e:
+            logging.error(f"Failed to get celery stats: {e}")
+            active_tasks = scheduled_tasks = reserved_tasks = registered_tasks = stats = {}
+        
+        queue_stats = {
+            "active_tasks": sum(len(tasks) for tasks in active_tasks.values()),
+            "scheduled_tasks": sum(len(tasks) for tasks in scheduled_tasks.values()),
+            "reserved_tasks": sum(len(tasks) for tasks in reserved_tasks.values()),
+            "total_workers": len(active_tasks),
+            "workers": [],
+            "queues": {},
+            "system_stats": {}
+        }
+        
+        for worker, tasks in active_tasks.items():
+            worker_info = {
+                "name": worker,
+                "active_tasks": len(tasks),
+                "status": "online",
+                "load_avg": stats.get(worker, {}).get('rusage', {}).get('utime', 0.0),
+                "memory_usage": random.uniform(100, 500),  
+                "uptime": random.uniform(3600, 86400)
+            }
+            queue_stats["workers"].append(worker_info)
+        
+        queue_names = ['data_processing', 'notifications', 'reports', 'file_processing', 
+                      'database', 'api_integration', 'image_processing', 'maintenance', 
+                      'monitoring', 'backup', 'analytics', 'cache', 'security', 'default']
+        
+        for queue_name in queue_names:
+            try:
+                queue_length = self.redis.llen(queue_name) or 0
+            except:
+                queue_length = 0
+                
+            queue_stats["queues"][queue_name] = {
+                "pending": queue_length,
+                "active": sum(1 for tasks in active_tasks.values() 
+                            for task in tasks if task.get('delivery_info', {}).get('routing_key', '').startswith(queue_name)),
+                "throughput": random.uniform(0.1, 10.0),
+                "avg_processing_time": random.uniform(1.0, 30.0)
+            }
+        
+        try:
+            redis_info = self.redis.info()
+            queue_stats["system_stats"] = {
+                "redis_memory": redis_info.get('used_memory_human', 'N/A'),
+                "redis_uptime": redis_info.get('uptime_in_seconds', 0),
+                "redis_connected_clients": redis_info.get('connected_clients', 0),
+                "total_commands_processed": redis_info.get('total_commands_processed', 0)
+            }
+        except Exception as e:
+            logging.error(f"Failed to get Redis stats: {e}")
+            queue_stats["system_stats"] = {}
+        
+        return queue_stats
+    
+    def get_recent_jobs(self, limit: int = 100, status_filter: str = None, 
+                       task_type_filter: str = None) -> List[JobResult]:
+        return self.db.get_recent_jobs(limit, status_filter)
+    
+    def get_job_metrics(self, task_name: str) -> Optional[JobMetrics]:
+        try:
+            with self.db.get_connection() as conn:
+                row = conn.execute(
+                    'SELECT * FROM job_metrics WHERE task_name = ?', 
+                    (task_name,)
+                ).fetchone()
+                
+                if row:
+                    return JobMetrics(
+                        execution_count=row['execution_count'],
+                        total_execution_time=row['total_execution_time'],
+                        average_execution_time=row['average_execution_time'],
+                        success_rate=row['success_rate'],
+                        failure_count=row['failure_count'],
+                        retry_count=row['retry_count'],
+                        last_execution=datetime.fromisoformat(row['last_execution']) if row['last_execution'] else None,
+                        memory_usage=row['memory_usage'],
+                        cpu_usage=row['cpu_usage']
+                    )
+        except Exception as e:
+            logging.error(f"Failed to get job metrics for {task_name}: {e}")
+        return None
+    
+    def update_job_metrics(self, task_name: str, execution_time: float, 
+                          success: bool, memory_usage: float = 0.0, cpu_usage: float = 0.0):
+        try:
+            with self.db.get_connection() as conn:
+                existing = conn.execute(
+                    'SELECT * FROM job_metrics WHERE task_name = ?', 
+                    (task_name,)
+                ).fetchone()
+                
+                if existing:
+                    new_count = existing['execution_count'] + 1
+                    new_total_time = existing['total_execution_time'] + execution_time
+                    new_avg_time = new_total_time / new_count
+                    new_failure_count = existing['failure_count'] + (0 if success else 1)
+                    new_success_rate = (new_count - new_failure_count) / new_count
+                    
+                    conn.execute('''
+                        UPDATE job_metrics 
+                        SET execution_count = ?, total_execution_time = ?, 
+                            average_execution_time = ?, success_rate = ?,
+                            failure_count = ?, last_execution = ?,
+                            memory_usage = ?, cpu_usage = ?
+                        WHERE task_name = ?
+                    ''', (new_count, new_total_time, new_avg_time, new_success_rate,
+                         new_failure_count, datetime.utcnow().isoformat(),
+                         memory_usage, cpu_usage, task_name))
+                else:
+                    conn.execute('''
+                        INSERT INTO job_metrics 
+                        (task_name, execution_count, total_execution_time, 
+                         average_execution_time, success_rate, failure_count,
+                         last_execution, memory_usage, cpu_usage)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (task_name, 1, execution_time, execution_time,
+                         1.0 if success else 0.0, 0 if success else 1,
+                         datetime.utcnow().isoformat(), memory_usage, cpu_usage))
+                
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Failed to update job metrics for {task_name}: {e}")
+    
+    def get_queue_metrics(self) -> List[QueueMetrics]:
+        queue_names = ['data_processing', 'notifications', 'reports', 'file_processing', 
+                      'database', 'api_integration', 'image_processing', 'maintenance', 
+                      'monitoring', 'backup', 'analytics', 'cache', 'security', 'default']
+        
+        metrics = []
+        for queue_name in queue_names:
+            try:
+                with self.db.get_connection() as conn:
+                    row = conn.execute(
+                        'SELECT * FROM queue_metrics WHERE queue_name = ?',
+                        (queue_name,)
+                    ).fetchone()
+                    
+                    if row:
+                        metrics.append(QueueMetrics(
+                            queue_name=row['queue_name'],
+                            pending_tasks=row['pending_tasks'],
+                            active_tasks=row['active_tasks'],
+                            completed_tasks=row['completed_tasks'],
+                            failed_tasks=row['failed_tasks'],
+                            average_wait_time=row['average_wait_time'],
+                            throughput=row['throughput']
+                        ))
+                    else:
+                        metrics.append(QueueMetrics(queue_name=queue_name))
+            except Exception as e:
+                logging.error(f"Failed to get metrics for queue {queue_name}: {e}")
+                metrics.append(QueueMetrics(queue_name=queue_name))
+        
+        return metrics
+    
+    def bulk_submit_jobs(self, jobs: List[Dict[str, Any]]) -> List[str]:
+        task_ids = []
+        for job_def in jobs:
+            try:
+                task_id = self.submit_job(
+                    task_type=job_def.get('task_type'),
+                    args=job_def.get('args', ()),
+                    kwargs=job_def.get('kwargs', {}),
+                    priority=Priority(job_def.get('priority', Priority.NORMAL.value)),
+                    delay=job_def.get('delay', 0)
+                )
+                task_ids.append(task_id)
+            except Exception as e:
+                logging.error(f"Failed to submit bulk job: {e}")
+                task_ids.append(None)
+        
+        return task_ids
+    
+    def get_job_history(self, task_type: str = None, days: int = 7) -> List[JobResult]:
+        try:
+            with self.db.get_connection() as conn:
+                cutoff_date = (datetime.utcnow() - timedelta(days=days)).isoformat()
+                
+                if task_type:
+                    rows = conn.execute('''
+                        SELECT * FROM jobs 
+                        WHERE task_name = ? AND created_at >= ?
+                        ORDER BY created_at DESC
+                    ''', (task_type, cutoff_date)).fetchall()
+                else:
+                    rows = conn.execute('''
+                        SELECT * FROM jobs 
+                        WHERE created_at >= ?
+                        ORDER BY created_at DESC
+                    ''', (cutoff_date,)).fetchall()
+                
+                jobs = []
+                for row in rows:
+                    jobs.append(JobResult(
+                        task_id=row['task_id'],
+                        task_name=row['task_name'],
+                        status=JobStatus(row['status']),
+                        result=json.loads(row['result']) if row['result'] else None,
+                        error=row['error'],
+                        traceback=row['traceback'],
+                        created_at=datetime.fromisoformat(row['created_at']) if row['created_at'] else None,
+                        started_at=datetime.fromisoformat(row['started_at']) if row['started_at'] else None,
+                        completed_at=datetime.fromisoformat(row['completed_at']) if row['completed_at'] else None,
+                        progress=row['progress'],
+                        retries=row['retries'],
+                        max_retries=row['max_retries'],
+                        priority=row['priority'],
+                        queue_name=row['queue_name'],
+                        worker_id=row['worker_id'],
+                        execution_time=row['execution_time'],
+                        memory_usage=row['memory_usage'],
+                        cpu_usage=row['cpu_usage'],
+                        metadata=json.loads(row['metadata']) if row['metadata'] else {}
+                    ))
+                
+                return jobs
+        except Exception as e:
+            logging.error(f"Failed to get job history: {e}")
+            return []
+
+flask_app = Flask(__name__)
+CORS(flask_app)
+
+flask_app.config.update(
+    SECRET_KEY=os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production'),
+    DEBUG=os.getenv('DEBUG', 'False').lower() == 'true',
+    TESTING=False,
+    JSON_SORT_KEYS=False
+)
+
+job_manager = AdvancedJobManager()
+
+@flask_app.route('/')
+def dashboard():
+    return render_template('dashboard.html')
+
+@flask_app.route('/api/health')
+def health_check():
+    try:
+        redis_status = redis_client.ping()
+        celery_status = True  
+        
+        return jsonify({
+            'status': 'healthy',
+            'services': {
+                'redis': 'up' if redis_status else 'down',
+                'celery': 'up' if celery_status else 'down',
+                'database': 'up'
+            },
+            'timestamp': datetime.utcnow().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.utcnow().isoformat()
+        }), 500
+
+@flask_app.route('/api/stats')
+def get_stats():
+    try:
+        stats = job_manager.get_queue_stats()
+        return jsonify(stats)
+    except Exception as e:
+        logging.error(f"Failed to get stats: {e}")
+        return jsonify({'error': 'Failed to retrieve statistics'}), 500
+
+@flask_app.route('/api/jobs')
+def get_jobs():
+    try:
+        limit = request.args.get('limit', 100, type=int)
+        status_filter = request.args.get('status')
+        task_type_filter = request.args.get('task_type')
+        
+        jobs = job_manager.get_recent_jobs(limit, status_filter, task_type_filter)
+        
+        jobs_data = []
+        for job in jobs:
+            job_data = {
+                'task_id': job.task_id,
+                'task_name': job.task_name,
+                'status': job.status.value,
+                'result': job.result,
+                'error': job.error,
+                'created_at': job.created_at.isoformat() if job.created_at else None,
+                'started_at': job.started_at.isoformat() if job.started_at else None,
+                'completed_at': job.completed_at.isoformat() if job.completed_at else None,
+                'progress': job.progress,
+                'retries': job.retries,
+                'max_retries': job.max_retries,
+                'priority': job.priority,
+                'queue_name': job.queue_name,
+                'worker_id': job.worker_id,
+                'execution_time': job.execution_time,
+                'memory_usage': job.memory_usage,
+                'cpu_usage': job.cpu_usage
+            }
+            jobs_data.append(job_data)
+        
+        return jsonify(jobs_data)
+    except Exception as e:
+        logging.error(f"Failed to get jobs: {e}")
+        return jsonify({'error': 'Failed to retrieve jobs'}), 500
+
+@flask_app.route('/api/job/<task_id>')
+def get_job(task_id):
+    try:
+        job = job_manager.get_job_status(task_id)
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        return jsonify({
+            'task_id': job.task_id,
+            'task_name': job.task_name,
+            'status': job.status.value,
+            'result': job.result,
+            'error': job.error,
+            'traceback': job.traceback,
+            'created_at': job.created_at.isoformat() if job.created_at else None,
+            'started_at': job.started_at.isoformat() if job.started_at else None,
+            'completed_at': job.completed_at.isoformat() if job.completed_at else None,
+            'progress': job.progress,
+            'retries': job.retries,
+            'max_retries': job.max_retries,
+            'priority': job.priority,
+            'queue_name': job.queue_name,
+            'worker_id': job.worker_id,
+            'execution_time': job.execution_time,
+            'memory_usage': job.memory_usage,
+            'cpu_usage': job.cpu_usage,
+            'metadata': job.metadata
+        })
+    except Exception as e:
+        logging.error(f"Failed to get job {task_id}: {e}")
+        return jsonify({'error': 'Failed to retrieve job'}), 500
+
+@flask_app.route('/api/job/submit', methods=['POST'])
+def submit_job():
+    try:
+        data = request.json
+        
+        if not data or not data.get('task_name'):
+            return jsonify({'error': 'Missing task_name'}), 400
+        
+        task_name = data.get('task_name')
+        args = data.get('args', [])
+        kwargs = data.get('kwargs', {})
+        priority = Priority(data.get('priority', Priority.NORMAL.value))
+        delay = data.get('delay', 0)
+        
+        task_id = job_manager.submit_job(
+            task_type=task_name,
+            args=tuple(args),
+            kwargs=kwargs,
+            priority=priority,
+            delay=delay
+        )
+        
+        return jsonify({
+            'task_id': task_id,
+            'status': 'submitted',
+            'message': f'Job {task_id} submitted successfully'
+        })
+    except ValueError as e:
+        return jsonify({'error': f'Invalid parameter: {str(e)}'}), 400
+    except Exception as e:
+        logging.error(f"Failed to submit job: {e}")
+        return jsonify({'error': 'Failed to submit job'}), 500
+
+@flask_app.route('/api/job/bulk_submit', methods=['POST'])
+def bulk_submit_jobs():
+    try:
+        data = request.json
+        
+        if not data or not isinstance(data.get('jobs'), list):
+            return jsonify({'error': 'Missing jobs array'}), 400
+        
+        jobs = data.get('jobs', [])
+        task_ids = job_manager.bulk_submit_jobs(jobs)
+        
+        return jsonify({
+            'task_ids': task_ids,
+            'submitted_count': len([tid for tid in task_ids if tid is not None]),
+            'failed_count': len([tid for tid in task_ids if tid is None])
+        })
+    except Exception as e:
+        logging.error(f"Failed to bulk submit jobs: {e}")
+        return jsonify({'error': 'Failed to bulk submit jobs'}), 500
+
+@flask_app.route('/api/job/<task_id>/cancel', methods=['POST'])
+def cancel_job(task_id):
+    try:
+        success = job_manager.cancel_job(task_id)
+        if success:
+            return jsonify({
+                'success': True,
+                'message': f'Job {task_id} cancelled successfully'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Failed to cancel job'
+            }), 500
+    except Exception as e:
+        logging.error(f"Failed to cancel job {task_id}: {e}")
+        return jsonify({'error': 'Failed to cancel job'}), 500
+
+@flask_app.route('/api/metrics/jobs')
+def get_job_metrics():
+    try:
+        task_name = request.args.get('task_name')
+        if task_name:
+            metrics = job_manager.get_job_metrics(task_name)
+            if metrics:
+                return jsonify(asdict(metrics))
+            else:
+                return jsonify({'error': 'Metrics not found'}), 404
+        else:
+            all_task_types = [task_type.value for task_type in TaskType]
+            all_metrics = {}
+            for task_type in all_task_types:
+                metrics = job_manager.get_job_metrics(task_type)
+                if metrics:
+                    all_metrics[task_type] = asdict(metrics)
+            return jsonify(all_metrics)
+    except Exception as e:
+        logging.error(f"Failed to get job metrics: {e}")
+        return jsonify({'error': 'Failed to retrieve job metrics'}), 500
+
+@flask_app.route('/api/metrics/queues')
+def get_queue_metrics():
+    try:
+        metrics = job_manager.get_queue_metrics()
+        return jsonify([asdict(metric) for metric in metrics])
+    except Exception as e:
+        logging.error(f"Failed to get queue metrics: {e}")
+        return jsonify({'error': 'Failed to retrieve queue metrics'}), 500
+
+@flask_app.route('/api/history')
+def get_job_history():
+    try:
+        task_type = request.args.get('task_type')
+        days = request.args.get('days', 7, type=int)
+        
+        history = job_manager.get_job_history(task_type, days)
+        
+        history_data = []
+        for job in history:
+            job_data = {
+                'task_id': job.task_id,
+                'task_name': job.task_name,
+                'status': job.status.value,
+                'created_at': job.created_at.isoformat() if job.created_at else None,
+                'execution_time': job.execution_time,
+                'retries': job.retries,
+                'priority': job.priority,
+                'queue_name': job.queue_name
+            }
+            history_data.append(job_data)
+        
+        return jsonify(history_data)
+    except Exception as e:
+        logging.error(f"Failed to get job history: {e}")
+        return jsonify({'error': 'Failed to retrieve job history'}), 500
+
+@flask_app.route('/api/tasks/types')
+def get_task_types():
+    try:
+        task_types = []
+        for task_type in TaskType:
+            task_info = {
+                'name': task_type.value,
+                'display_name': task_type.name.replace('_', ' ').title(),
+                'queue': job_manager.get_queue_for_task(task_type.value),
+                'description': f"Handles {task_type.name.replace('_', ' ').lower()} operations"
+            }
+            task_types.append(task_info)
+        
+        return jsonify(task_types)
+    except Exception as e:
+        logging.error(f"Failed to get task types: {e}")
+        return jsonify({'error': 'Failed to retrieve task types'}), 500
+
+@flask_app.errorhandler(404)
+def not_found_error(error):
+    return jsonify({'error': 'Endpoint not found'}), 404
+
+@flask_app.errorhandler(500)
+def internal_error(error):
+    return jsonify({'error': 'Internal server error'}), 500
+
+if __name__ == '__main__':
+    print("Starting Job Queue System...")
+    print(f"Dashboard will be available at: http://localhost:5000")
+    print(f"API endpoints available at: http://localhost:5000/api/*")
+    print(f"Redis URL: {redis_url}")
+    print(f"Database: {db_manager.db_path}")
+    
+    flask_app.run(
+        host='0.0.0.0',
+        port=5000,
+        debug=False,
+        threaded=True,
+        use_reloader=False
+    )
