@@ -1,0 +1,63 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: job_queue_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  web:
+    build: .
+    container_name: job_queue_web
+    ports:
+      - "5000:5000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    volumes:
+      - ./templates:/app/templates
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: job_queue_worker
+    command: celery -A main.celery_app worker --loglevel=info --queues=data_processing,notifications,reports,maintenance,celery
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  beat:
+    build: .
+    container_name: job_queue_beat
+    command: celery -A main.celery_app beat --loglevel=info
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  flower:
+    build: .
+    container_name: job_queue_flower
+    command: celery -A main.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+volumes:
+  redis_data:

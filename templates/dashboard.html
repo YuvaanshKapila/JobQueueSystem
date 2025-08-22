@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Queue System Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+
+        .stat-card h3 {
+            color: #666;
+            font-size: 14px;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+
+        .stat-card .number {
+            font-size: 32px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+        }
+
+        .controls h3 {
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+
+        .form-group select,
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .btn {
+            background: #667eea;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+
+        .btn:hover {
+            background: #5a6fd8;
+        }
+
+        .btn-danger {
+            background: #e74c3c;
+        }
+
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+
+        .jobs-section {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .jobs-header {
+            background: #f8f9fa;
+            padding: 20px;
+            border-bottom: 1px solid #dee2e6;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .jobs-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .jobs-table th,
+        .jobs-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .jobs-table th {
+            background: #f8f9fa;
+            font-weight: bold;
+            color: #495057;
+        }
+
+        .status-badge {
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .status-pending { background: #ffc107; color: #856404; }
+        .status-started { background: #17a2b8; color: #0c5460; }
+        .status-success { background: #28a745; color: #155724; }
+        .status-failure { background: #dc3545; color: #721c24; }
+        .status-retry { background: #fd7e14; color: #8a4a0a; }
+        .status-revoked { background: #6c757d; color: #383d41; }
+
+        .priority-badge {
+            padding: 2px 6px;
+            border-radius: 8px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        .priority-0 { background: #e9ecef; color: #6c757d; }
+        .priority-3 { background: #d1ecf1; color: #0c5460; }
+        .priority-6 { background: #d4edda; color: #155724; }
+        .priority-9 { background: #f8d7da; color: #721c24; }
+
+        .refresh-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: #667eea;
+            color: white;
+            border: none;
+            font-size: 20px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            transition: transform 0.2s;
+        }
+
+        .refresh-btn:hover {
+            transform: scale(1.1);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        @media (max-width: 768px) {
+            .jobs-table {
+                font-size: 12px;
+            }
+            
+            .jobs-table th,
+            .jobs-table td {
+                padding: 8px 4px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Job Queue System Dashboard</h1>
+            <p>Monitor and manage your asynchronous job processing</p>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Active Tasks</h3>
+                <div class="number" id="active-count">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Scheduled Tasks</h3>
+                <div class="number" id="scheduled-count">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Reserved Tasks</h3>
+                <div class="number" id="reserved-count">0</div>
+            </div>
+            <div class="stat-card">
+                <h3>Workers Online</h3>
+                <div class="number" id="workers-count">0</div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <h3>Submit New Job</h3>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                <div class="form-group">
+                    <label for="task-select">Task Type</label>
+                    <select id="task-select">
+                        <option value="data_processing_task">Data Processing</option>
+                        <option value="email_task">Email Notification</option>
+                        <option value="report_generation_task">Report Generation</option>
+                        <option value="cleanup_task">Cleanup Task</option>
+                        <option value="health_check_task">Health Check</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="priority-select">Priority</label>
+                    <select id="priority-select">
+                        <option value="0">Low</option>
+                        <option value="3" selected>Normal</option>
+                        <option value="6">High</option>
+                        <option value="9">Critical</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="delay-input">Delay (seconds)</label>
+                    <input type="number" id="delay-input" min="0" value="0" placeholder="0">
+                </div>
+                <div class="form-group">
+                    <label>&nbsp;</label>
+                    <button class="btn" onclick="submitJob()">Submit Job</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="jobs-section">
+            <div class="jobs-header">
+                <h3>Recent Jobs</h3>
+                <button class="btn" onclick="loadJobs()">Refresh</button>
+            </div>
+            <div class="loading" id="loading">Loading jobs...</div>
+            <table class="jobs-table" id="jobs-table" style="display: none;">
+                <thead>
+                    <tr>
+                        <th>Task ID</th>
+                        <th>Status</th>
+                        <th>Priority</th>
+                        <th>Created</th>
+                        <th>Duration</th>
+                        <th>Retries</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="jobs-tbody">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <button class="refresh-btn" onclick="refreshAll()" title="Refresh All">
+        ↻
+    </button>
+
+    <script>
+        let refreshInterval;
+
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                document.getElementById('active-count').textContent = stats.active_tasks || 0;
+                document.getElementById('scheduled-count').textContent = stats.scheduled_tasks || 0;
+                document.getElementById('reserved-count').textContent = stats.reserved_tasks || 0;
+                document.getElementById('workers-count').textContent = stats.workers?.length || 0;
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+
+        async function loadJobs() {
+            try {
+                const response = await fetch('/api/jobs?limit=100');
+                const jobs = await response.json();
+                
+                const tbody = document.getElementById('jobs-tbody');
+                const loading = document.getElementById('loading');
+                const table = document.getElementById('jobs-table');
+                
+                tbody.innerHTML = '';
+                
+                jobs.forEach(job => {
+                    const row = document.createElement('tr');
+                    const createdAt = new Date(job.created_at);
+                    const duration = job.completed_at 
+                        ? Math.round((new Date(job.completed_at) - createdAt) / 1000) + 's'
+                        : job.started_at 
+                            ? Math.round((new Date() - new Date(job.started_at)) / 1000) + 's'
+                            : '-';
+                    
+                    const priorityLabels = {0: 'LOW', 3: 'NORMAL', 6: 'HIGH', 9: 'CRITICAL'};
+                    
+                    row.innerHTML = `
+                        <td><code>${job.task_id.substring(0, 8)}...</code></td>
+                        <td><span class="status-badge status-${job.status.toLowerCase()}">${job.status}</span></td>
+                        <td><span class="priority-badge priority-${job.priority}">${priorityLabels[job.priority] || job.priority}</span></td>
+                        <td>${createdAt.toLocaleString()}</td>
+                        <td>${duration}</td>
+                        <td>${job.retries || 0}</td>
+                        <td>
+                            ${job.status === 'PENDING' || job.status === 'STARTED' 
+                                ? `<button class="btn btn-danger" onclick="cancelJob('${job.task_id}')">Cancel</button>`
+                                : '-'
+                            }
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                
+                loading.style.display = 'none';
+                table.style.display = 'table';
+            } catch (error) {
+                console.error('Error loading jobs:', error);
+                document.getElementById('loading').textContent = 'Error loading jobs';
+            }
+        }
+
+        async function submitJob() {
+            const taskType = document.getElementById('task-select').value;
+            const priority = parseInt(document.getElementById('priority-select').value);
+            const delay = parseInt(document.getElementById('delay-input').value) || 0;
+            
+            let args = [];
+            let kwargs = {};
+            
+            switch(taskType) {
+                case 'data_processing_task':
+                    args = [Math.floor(Math.random() * 1000) + 100, 'standard'];
+                    break;
+                case 'email_task':
+                    args = ['user@example.com', 'Test Subject', 'default'];
+                    break;
+                case 'report_generation_task':
+                    args = ['daily_report'];
+                    kwargs = {parameters: {date: new Date().toISOString().split('T')[0]}};
+                    break;
+                case 'cleanup_task':
+                case 'health_check_task':
+                    break;
+            }
+            
+            try {
+                const response = await fetch('/api/job/submit', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        task_name: taskType,
+                        args: args,
+                        kwargs: kwargs,
+                        priority: priority,
+                        delay: delay
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    alert(`Job submitted successfully! Task ID: ${result.task_id}`);
+                    loadJobs();
+                } else {
+                    alert(`Error: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error submitting job:', error);
+                alert('Error submitting job');
+            }
+        }
+
+        async function cancelJob(taskId) {
+            if (!confirm('Are you sure you want to cancel this job?')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/job/${taskId}/cancel`, {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    alert('Job cancelled successfully');
+                    loadJobs();
+                } else {
+                    alert(`Error: ${result.error}`);
+                }
+            } catch (error) {
+                console.error('Error cancelling job:', error);
+                alert('Error cancelling job');
+            }
+        }
+
+        function refreshAll() {
+            loadStats();
+            loadJobs();
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshAll();
+            
+            refreshInterval = setInterval(refreshAll, 5000);
+        });
+
+        window.addEventListener('beforeunload', function() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
